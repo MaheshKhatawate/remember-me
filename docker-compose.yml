@@ -1,0 +1,62 @@
+services:
+  mongo:
+    image: mongo:7
+    container_name: readme-assistant-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rag:
+    build:
+      context: ./rag
+    container_name: readme-assistant-rag
+    restart: unless-stopped
+    env_file:
+      - ./rag/.env
+    environment:
+      CHROMA_PERSIST_DIR: /data/chroma
+    volumes:
+      - chroma-data:/data/chroma
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+    container_name: readme-assistant-backend
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+      rag:
+        condition: service_healthy
+    env_file:
+      - ./backend/.env
+    environment:
+      PORT: 3000
+      MONGODB_URI: mongodb://mongo:27017/readme-assistant
+      RAG_SERVICE_URL: http://rag:8001
+      BACKEND_URL: http://backend:3000
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mongo-data:
+  chroma-data:

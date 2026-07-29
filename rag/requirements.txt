@@ -1,0 +1,19 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.10.3
+chromadb==0.5.23
+python-dotenv==1.0.1
+requests==2.32.3
+
+# Embeddings: Hugging Face is the default backend (see app/embeddings.py).
+# sentence-transformers is used for local, on-device embedding when
+# HUGGINGFACE_API_KEY is not set (falls back to the hosted Inference API
+# instead if you'd rather not install this locally).
+sentence-transformers==3.3.1
+
+# Testing
+pytest==8.3.4
+httpx==0.27.2
+
+# Optional alternative embedding backend (opt-in via EMBEDDING_BACKEND=openai):
+# openai==1.57.0
