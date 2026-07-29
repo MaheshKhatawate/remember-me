@@ -23,6 +23,14 @@ from . import store
 logger = logging.getLogger("rag")
 logging.basicConfig(level=logging.INFO)
 
+# chromadb 0.5.x ships with a posthog telemetry integration that calls
+# capture() with the wrong number of positional arguments in some posthog
+# versions, producing noisy ERROR log lines on every operation even though
+# telemetry is disabled via anonymized_telemetry=False in store.py.
+# Raise the threshold for that specific logger to CRITICAL so only genuine
+# internal chromadb errors (not the harmless telemetry mismatch) are printed.
+logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICAL)
+
 app = FastAPI(
     title="Telegram README RAG Service",
     description="Chunking, embedding, and semantic search over a GitHub README.",

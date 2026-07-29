@@ -69,8 +69,7 @@ export const syncReadmeIndex = async (readmeContent: string, sourcePath = "READM
 			return { remote: true, chunks: remote.chunks };
 		} catch (error) {
 			console.warn(
-				`RAG service indexing failed, falling back to local index: ${
-					error instanceof Error ? error.message : error
+				`RAG service indexing failed, falling back to local index: ${error instanceof Error ? error.message : error
 				}`,
 			);
 		}
@@ -110,8 +109,7 @@ export const searchReadme = async (query: string, sourcePath = "README.md", topK
 			}
 		} catch (error) {
 			console.warn(
-				`RAG service query failed, falling back to local search: ${
-					error instanceof Error ? error.message : error
+				`RAG service query failed, falling back to local search: ${error instanceof Error ? error.message : error
 				}`,
 			);
 		}
@@ -151,20 +149,34 @@ export const answerWithContext = async (
 
 	const model = new ChatGroq({
 		apiKey,
-		model: "llama-3.3-70b-versatile",
+		model: "llama-3.1-8b-instant",
 		temperature: 0.2,
 	});
 
-	const response = await model.invoke([
-		{
-			role: "system",
-			content: "You are a concise assistant that answers questions using only the provided README context. Cite the most relevant links or sections and avoid inventing facts.",
-		},
-		{
-			role: "user",
-			content: `Question: ${query}\n\nContext:\n${formattedContext || "No context found."}`,
-		},
-	]);
+	try {
+		const response = await model.invoke([
+			{
+				role: "system",
+				content: "You are a concise assistant that answers questions using only the provided README context. Cite the most relevant links or sections and avoid inventing facts.",
+			},
+			{
+				role: "user",
+				content: `Question: ${query}\n\nContext:\n${formattedContext || "No context found."}`,
+			},
+		]);
 
-	return typeof response.content === "string" ? response.content : String(response.content ?? "");
+		return typeof response.content === "string" ? response.content : String(response.content ?? "");
+	} catch (groqError) {
+		// Groq call failed (bad key, rate limit, network error, etc.) — log the
+		// reason and fall back to returning the raw matched snippets so the user
+		// still gets useful output instead of a 500.
+		console.warn(
+			`Groq answer synthesis failed, falling back to raw context: ${groqError instanceof Error ? groqError.message : groqError
+			}`,
+		);
+		if (context.length === 0) {
+			return `No strong README matches were found for: ${query}`;
+		}
+		return [`Best matches for: ${query}`, formattedContext].filter(Boolean).join("\n");
+	}
 };

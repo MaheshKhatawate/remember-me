@@ -53,7 +53,9 @@ export const processMessage = async (message: string) => {
 	const content = toText(classification.content) || toText(classification.query) || message;
 
 	if (intent === "READ") {
-		await syncReadmeIndex(currentReadme || readmeFile.content || "");
+		// The index is rebuilt after every mutation (CREATE/UPDATE/DELETE/RESET) and
+		// via the explicit /sync command. Re-indexing on every read query is expensive
+		// and causes timeouts — just query whatever is already indexed.
 		const results = await searchReadme(content || message);
 		const answer = await answerWithContext(content || message, results);
 

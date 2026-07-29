@@ -124,6 +124,27 @@ const heuristicClassify = (message: string): Classification => {
 		};
 	}
 
+	// Greeting / social phrases and very short messages (< 20 chars with no URL)
+	// should NOT silently become README entries — the user is almost certainly
+	// not trying to save a knowledge-base item. Classify as READ so they get a
+	// "nothing found" reply rather than a phantom commit. When Groq is configured
+	// it can still override this if the message genuinely looks like a note.
+	const isGreeting = /^(hi|hey|hello|hola|yo|sup|greetings?|howdy|thanks?|thank\s+you|ok|okay|bye|good\s+(?:morning|afternoon|evening|night)|what'?s?\s+up)\b/i.test(
+		cleaned,
+	);
+	const isVeryShort = cleaned.length < 20 && extractedUrls.length === 0;
+
+	if (isGreeting || isVeryShort) {
+		return {
+			intent: "READ" as const,
+			type: "normal" as const,
+			query: cleaned,
+			content: cleaned,
+			urls: undefined,
+			confidence: 0.25,
+		};
+	}
+
 	return {
 		intent: "CREATE" as const,
 		type: "normal" as const,

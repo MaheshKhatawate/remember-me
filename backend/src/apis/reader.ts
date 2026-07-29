@@ -5,28 +5,28 @@ import { processMessage } from "../services/assistant.js";
 const router = express.Router();
 
 router.post("/reader", async (req, res) => {
-    const { success, data } = MessageSchema.safeParse(req.body);
+	const { success, data } = MessageSchema.safeParse(req.body);
 
-    if (!success) {
-        return res.status(401).json({
-            message: "Error in request body"
-        })
-    }
+	if (!success) {
+		return res.status(400).json({
+			message: "Invalid request body: 'message' (non-empty string) is required.",
+		});
+	}
 
-    const message = data.message;
+	const message = data.message;
 
-    try {
-        const result = await processMessage(message);
+	try {
+		const result = await processMessage(message);
 
-        return res.status(200).json({
-            message: result.message,
-            result,
-        });
-    } catch (err) {
-        return res.status(500).json({
-            message: err instanceof Error ? err.message : "Error in processing the message"
-        })
-    }
+		return res.status(200).json({
+			message: result.message,
+			result,
+		});
+	} catch (err) {
+		return res.status(500).json({
+			message: err instanceof Error ? err.message : "Error processing the message",
+		});
+	}
 });
 
 export default router;

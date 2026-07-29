@@ -11,7 +11,7 @@ const apiSecret = process.env.BACKEND_API_SECRET;
 const client = axios.create({
 	baseURL: backendUrl,
 	headers: apiSecret ? { "x-api-key": apiSecret } : {},
-	timeout: 20000,
+	timeout: 30000, // 30 s — enough for first-time RAG warm-up without re-indexing on every read
 });
 
 // Optional access control: if TELEGRAM_ALLOWED_USER_IDS is set, only those
@@ -43,21 +43,28 @@ bot.use(async (ctx, next) => {
 const helpText = [
 	"*README Knowledge Assistant*",
 	"",
-	"I turn Telegram messages into changes on your GitHub README, and answer questions about what's in it.",
+	"I manage your GitHub README through chat — create, search, update, and delete entries using plain English or slash commands.",
 	"",
-	"*CRUD commands*",
-	"`/add <topic> <link or content>` – append a new entry",
-	"`/update <section/topic> <new content>` – update a matching entry",
-	"`/delete <section/topic>` – remove a matching entry",
-	"`/get <topic>` – fetch/search for an entry",
+	"*Natural language (just type it)*",
+	"\"What links do I have about Docker?\" — searches semantically",
+	"\"Add a note about React\" — creates an entry",
+	"\"Remove the Kubernetes entry\" — deletes a matching entry",
+	"Any plain-text message (no `/`) is treated as a smart search or instruction.",
 	"",
-	"*Natural language*",
-	'You can also just type things like "find me all links related to machine learning" and I\'ll search semantically.',
+	"*CRUD slash commands*",
+	"`/add <topic> [url] [description]` – append a new entry",
+	"  _Example:_ `/add Docker https://docker.com Container platform`",
+	"`/update <topic> [url] [description]` – update a matching entry in place",
+	"`/delete <topic>` – remove a matching entry",
+	"`/get <topic>` (or `/find`, `/search`) – search for an entry",
+	"_Aliases:_ `/create`, `/new` → add; `/edit` → update; `/remove` → delete",
 	"",
 	"*Control commands*",
-	"`/status` – health of the backend, MongoDB, GitHub, and the RAG service",
-	"`/sync` – re-fetch the README from GitHub and rebuild the search index",
-	"`/reset CONFIRM` – wipe the *entire* README (irreversible via the bot; requires typing CONFIRM)",
+	"`/status` – health of MongoDB, GitHub, RAG service, and Groq LLM",
+	"`/sync` – re-fetch README from GitHub and rebuild the search index",
+	"`/reset` – shows a safety warning (nothing changes)",
+	"`/reset CONFIRM` – wipe the entire README (requires typing CONFIRM)",
+	"`/reset CONFIRM <content>` – replace the README with new content",
 	"`/help` – show this message",
 ].join("\n");
 
@@ -79,6 +86,27 @@ const forwardToBackend = async (ctx: { reply: (text: string) => Promise<unknown>
 
 	await ctx.reply(response.data.message);
 };
+
+// Register commands with Telegram so they appear in the "/" autocomplete menu.
+// This is fire-and-forget — if it fails (e.g. no network at startup) the bot
+// still works fine; the menu just won't show the command list.
+void bot.telegram
+	.setMyCommands([
+		{ command: "help", description: "Show command reference" },
+		{ command: "start", description: "Show command reference" },
+		{ command: "status", description: "Health: MongoDB, GitHub, RAG service, Groq" },
+		{ command: "sync", description: "Re-fetch README from GitHub and rebuild search index" },
+		{ command: "reset", description: "Wipe/replace the entire README (requires CONFIRM)" },
+		{ command: "add", description: "Append a new entry: /add <topic> [url] [description]" },
+		{ command: "update", description: "Update a matching entry: /update <topic> [url] [description]" },
+		{ command: "delete", description: "Remove a matching entry: /delete <topic>" },
+		{ command: "get", description: "Semantic search: /get <topic>" },
+		{ command: "find", description: "Semantic search: /find <topic>" },
+		{ command: "search", description: "Semantic search: /search <topic>" },
+	])
+	.catch((err: unknown) =>
+		console.warn("Could not register bot commands with Telegram:", err instanceof Error ? err.message : err),
+	);
 
 bot.command("help", async (ctx) => {
 	await ctx.replyWithMarkdown(helpText);
