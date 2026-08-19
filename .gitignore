@@ -1,3 +1,8 @@
-PROGRESS_AND_TESTS.md
-RUN_GUIDE.md
+# Agent config (local only)
 AGENTS.md
+
+# OS
+.DS_Store
+
+# Python
+__pycache__/
