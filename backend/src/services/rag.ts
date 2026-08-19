@@ -135,12 +135,28 @@ export const answerWithContext = async (
 	context: Array<{ section?: string | undefined; title?: string | undefined; content: string; score: number }>,
 ) => {
 	const apiKey = process.env.GROQ_API_KEY ?? process.env.GROQ_API;
-	const formattedContext = context
-		.map((item, index) => `${index + 1}. ${item.section ? `[${item.section}] ` : ""}${item.title ? `${item.title}: ` : ""}${item.content}`)
+	const cleanChunkText = (text: string) =>
+		text
+			.split(/\r?\n/)
+			.map((line) => line.replace(/^#{1,6}\s+/, "").trim())
+			.filter((line) => line.length > 0)
+			.join(" | ");
+
+	const presentable = context
+		.map((item) => {
+			const text = cleanChunkText(item.content);
+			if (text.length === 0) return null;
+			const label = item.section ?? item.title ?? "";
+			return { label, text };
+		})
+		.filter((item): item is { label: string; text: string } => item !== null);
+
+	const formattedContext = presentable
+		.map((item, index) => `${index + 1}. ${item.label ? `[${item.label}] ` : ""}${item.text}`)
 		.join("\n");
 
 	if (!apiKey) {
-		if (context.length === 0) {
+		if (presentable.length === 0) {
 			return `No strong README matches were found for: ${query}`;
 		}
 
@@ -149,7 +165,7 @@ export const answerWithContext = async (
 
 	const model = new ChatGroq({
 		apiKey,
-		model: "llama-3.1-8b-instant",
+		model: "openai/gpt-oss-20b",
 		temperature: 0.2,
 	});
 
@@ -174,7 +190,7 @@ export const answerWithContext = async (
 			`Groq answer synthesis failed, falling back to raw context: ${groqError instanceof Error ? groqError.message : groqError
 			}`,
 		);
-		if (context.length === 0) {
+		if (presentable.length === 0) {
 			return `No strong README matches were found for: ${query}`;
 		}
 		return [`Best matches for: ${query}`, formattedContext].filter(Boolean).join("\n");

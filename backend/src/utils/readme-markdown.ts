@@ -127,11 +127,13 @@ export const formatReadmeEntry = ({
 	}
 
 	if (url) {
-		return `- ${url}${content ? ` - ${content}` : ""}`;
+		const suffix = content && normalize(content) !== normalize(url) ? ` - ${content}` : "";
+		return `- ${url}${suffix}`;
 	}
 
 	if (title) {
-		return `- ${title}${content ? ` - ${content}` : ""}`;
+		const suffix = content && normalize(content) !== normalize(title) ? ` - ${content}` : "";
+		return `- ${title}${suffix}`;
 	}
 
 	return `- ${content}`;
