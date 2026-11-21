@@ -1,231 +1,134 @@
-# Remember Me — Telegram-Driven GitHub README Manager
+# Remember Me
 
-> A personal knowledge base that lives inside a GitHub `README.md`, managed entirely through Telegram chat. Message a bot in plain English to save links, search notes semantically, and keep everything committed to Git — no web dashboard needed.
+A second brain you can message on Telegram. Send a link, a reminder, or a note. The bot files it in a GitHub README, then makes it searchable. You can open the same file on GitHub to browse it or edit it by hand.
 
-```
-Telegram  ──▶  Backend (Node.js / TypeScript)  ──▶  GitHub Contents API
-                     │                                    (README.md)
-                     │  HTTP /index /query
-                     ▼
-              RAG Service (Python / FastAPI / ChromaDB)
+## A conversation with your notebook
 
-              MongoDB
-              ├── audit log (every processed message)
-              └── local fallback vector index
-```
+| Send this in Telegram | What happens |
+| --- | --- |
+| `/add Kubernetes https://kubernetes.io Container orchestration` | Saves a clickable entry under **Links**. |
+| `The spare automobile key is inside the striped biscuit tin.` | Saves the sentence under **Notes**. |
+| `Remind me to return the library books on Friday` | Saves the task under **Reminders** for later recall. |
+| `/add [Books] Invisible Cities - Italo Calvino` | Creates or reuses the **Books** section. |
+| `Where did I put the backup car keys?` | Searches for relevant entries. With Groq enabled, it answers from those entries. |
+| `/update Kubernetes https://kubernetes.io Cluster scheduler` | Replaces the matching bullet in place. |
+| `/delete Kubernetes` | Removes the matching bullet. An ambiguous target prompts you to be more specific. |
 
----
+The first four messages produce a notebook like this:
 
-## Features
+```markdown
+# Second Brain
 
-- **Chat-native CRUD** — `/add`, `/update`, `/delete`, `/get` entries via Telegram slash commands or plain English
-- **Semantic search (RAG)** — ask "find me links about containers" and get relevant results, not keyword matches
-- **Git-backed** — every change is committed to GitHub with a descriptive message; full history via `git log`
-- **LLM-powered classification** — Groq (`llama-3.3-70b-versatile`) classifies intent and synthesizes answers
-- **Graceful degradation** — every external dependency has a fallback; the system never hard-fails:
+## Links
 
-| Component | Primary | Fallback |
-|---|---|---|
-| Intent classification | Groq LLM | Regex/keyword heuristic |
-| Embeddings | Hugging Face (API or local model) | Hashed bag-of-words |
-| Vector search | Python RAG service (ChromaDB) | In-process cosine similarity over MongoDB |
+- [Kubernetes](https://kubernetes.io) - Container orchestration
 
----
+## Notes
 
-## Tech Stack
+- The spare automobile key is inside the striped biscuit tin.
 
-| Service | Stack | Role |
-|---|---|---|
-| **Backend** | Node.js 22, TypeScript (strict), Express 5, Telegraf 4, LangChain + Groq, Mongoose, Zod | Telegram bot, HTTP API, intent classification, GitHub CRUD, RAG orchestration |
-| **RAG** | Python 3.11, FastAPI, ChromaDB, sentence-transformers | Markdown chunking, embedding, vector search |
-| **MongoDB** | MongoDB 7 | Audit log, local fallback vector index |
+## Reminders
 
----
+- return the library books on Friday
 
-## Quick Start
+## Books
 
-### Prerequisites
-
-- **Telegram bot token** — message [@BotFather](https://t.me/BotFather), run `/newbot`, copy the token
-- **GitHub PAT** — [create one](https://github.com/settings/tokens) with `Contents: Read and write` on the target repo
-- **Groq API key** *(recommended)* — [console.groq.com/keys](https://console.groq.com/keys)
-- **Docker + Docker Compose**
-
-### Docker Compose (recommended)
-
-```bash
-cp backend/.env.example backend/.env
-cp rag/.env.example rag/.env
+- Invisible Cities - Italo Calvino
 ```
 
-Fill in `backend/.env`:
+Reminders are searchable notes. Delivery at a scheduled time is outside the current feature set.
 
-```env
-TELEGRAM_BOT_TOKEN=<your-bot-token>
-GITHUB_OWNER=<your-github-username>
-GITHUB_REPO=<your-repo-name>
-GITHUB_TOKEN=<your-github-pat>
-GROQ_API_KEY=<your-groq-key>          # optional but recommended
+## Run it
+
+1. Create a Telegram bot with [BotFather](https://t.me/BotFather). Choose a GitHub repository and an existing branch for your notebook. A dedicated private repository keeps your personal entries together. Give the bot a fine-grained GitHub token with **Contents — Read and write** on that repository.
+2. Create the configuration files if this is a fresh checkout.
+
+   ```sh
+   cp -n backend/.env.example backend/.env
+   cp -n rag/.env.example rag/.env
+   ```
+
+3. Set `TELEGRAM_BOT_TOKEN`, `GITHUB_OWNER`, `GITHUB_REPO`, and `GITHUB_TOKEN` in `backend/.env`. Set `GITHUB_BRANCH` if you use a branch other than `main`. Add your numeric Telegram ID to `TELEGRAM_ALLOWED_USER_IDS` to limit who can read or change the notebook. Set `BACKEND_API_SECRET` to protect the HTTP API.
+4. Start the services.
+
+   ```sh
+   docker compose up --build
+   ```
+
+5. Open the bot and send `/status`. Send `/sync` to import an existing README, or `/add My first note` to start one. The first search also imports an existing README when the local index is empty. The first local model download can take a few minutes.
+
+### Optional AI settings
+
+| File | Setting | Purpose |
+| --- | --- | --- |
+| `backend/.env` | `GROQ_API_KEY` | Enables natural-language classification and answers grounded in retrieved passages. Without it, the bot uses command and keyword rules and returns ranked excerpts. |
+| `backend/.env` | `GROQ_MODEL` | Selects the Groq model. The default is `openai/gpt-oss-20b`. |
+| `rag/.env` | `HUGGINGFACE_MODEL` | Defaults to `sentence-transformers/all-MiniLM-L6-v2`. The local model provides semantic retrieval even without Groq. |
+| `rag/.env` | `HUGGINGFACE_API_KEY` | Tries hosted inference first. With no key or a failed hosted request, the service tries the local model. Compose persists downloaded models. |
+| `rag/.env` | `EMBEDDING_BACKEND` | Choose `huggingface` (default), `hash` for offline keyword matching, or `openai` with `OPENAI_API_KEY`. |
+
+MongoDB stores the audit history and a fallback search index. Compose supplies `MONGODB_URI` and `RAG_SERVICE_URL` and persists MongoDB and ChromaDB in named volumes. Only one backend instance should poll a given Telegram bot.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    User["Telegram chat"] <--> Bot["Telegraf bot"]
+    Bot <--> API["Node.js / Express backend"]
+    API <-->|"Read README / commit edits with SHA"| GitHub["GitHub README.md"]
+    API <-->|"Classify messages / answer from excerpts"| Groq["Groq (optional)"]
+    API <-->|"Index README / query passages"| RAG["Python / FastAPI RAG service"]
+    RAG <-->|"Embed chunks and questions"| Model["Hosted or local embedding model / hash fallback"]
+    RAG <-->|"Store and retrieve passages"| Chroma[("ChromaDB")]
+    API <-->|"Audit log / fallback search index"| Mongo[("MongoDB")]
 ```
 
-Then start everything:
+## How a message becomes an answer
 
-```bash
-docker compose up --build
-```
+1. **Classify.** Slash commands have fixed meanings. Free-form messages use Groq when available and fall back to local rules. Explicit questions search the notebook.
+2. **Save.** The backend fetches the current README and formats the entry as one bullet in its section. It commits changed content using the SHA it actually read. An identical entry in the same section needs no new commit. If a GitHub edit conflicts, the bot reports the conflict.
+3. **Preprocess and index.** The indexer splits Markdown into whole sections and individual bullets. Each chunk keeps its section and original text, including URLs. Heading-only sections produce no matches. The Python service embeds the chunks and publishes a complete Chroma index. MongoDB also receives a snapshot for the same README revision.
+4. **Retrieve.** The question is embedded with the encoder that built the index. The service ranks passages, checks relevance, and suppresses duplicate list sections. When the semantic encoder is unavailable, matching terms provide a fallback. The backend checks the README revision before trusting remote results and rebuilds a stale remote index on the next search.
+5. **Answer.** Groq receives the question and the selected passages. Without Groq, the bot shows the matching text with section labels. With no relevant passages, it reports that it found no strong match.
 
-Watch for:
+The GitHub README is the source of truth. A pending-write marker lets the next search recover if the backend stops between a GitHub commit and index publication. Run `/sync` after editing it directly, including after restoring an older commit. When upgrading from the older index format, `/sync` rebuilds both indexes from that same file.
 
-```
-readme-assistant-backend  | Connected to MongoDB
-readme-assistant-backend  | Server running on http://localhost:3000
-readme-assistant-backend  | Telegram bot is running
-```
+## Commands and recovery
 
-Open Telegram → find your bot → send `/help`. Send `/sync` to index an existing README.
+| Command | Behavior |
+| --- | --- |
+| `/help`, `/start` | Show examples and commands. |
+| `/add`, `/create`, `/new` | Save a note or link. Use `[Section]` after the command to choose a section. |
+| `/get`, `/find`, `/search` | Find entries by topic. Natural-language questions also work. |
+| `/update`, `/edit` | Edit by topic or title. If nothing matches, append a new entry and report it. Use `title - description` for a titled note. |
+| `/delete`, `/remove` | Delete a matching entry. A missing or ambiguous target leaves the file intact. |
+| `/status` | Show uptime, MongoDB state, GitHub and Groq configuration, RAG reachability, and the encoder used by published indexes. |
+| `/sync` | Read GitHub again and rebuild both indexes. The reply identifies which search service is available. |
+| `/reset CONFIRM [replacement text]` | Clear or replace the entire notebook and rebuild search. A bare `/reset` displays the confirmation instructions. GitHub retains the previous commit. |
 
-To stop: `docker compose down` (add `-v` to also wipe volumes).
+If paraphrases stop matching, send `/status`. A hash index can find shared terms such as “library” but may miss a paraphrase. Restore access to the local model or hosted provider, then send `/sync` to rebuild semantic embeddings. For a GitHub permissions error, check the configured repository, branch, and token permissions.
 
-> **Security note:** By default, any Telegram user who finds your bot has full read/write access. Set `TELEGRAM_ALLOWED_USER_IDS` to a comma-separated list of Telegram user IDs to restrict access. Message [@userinfobot](https://t.me/userinfobot) to find your ID.
+## Local development
 
-### Manual Setup (no Docker)
+Run MongoDB locally or set `MONGODB_URI` in `backend/.env`. With the configuration files above, start the services in separate terminals.
 
-**MongoDB** — Run locally (`mongod --dbpath ./data/db`) or use [MongoDB Atlas](https://www.mongodb.com/atlas) free tier.
-
-**RAG service:**
-
-```bash
+```sh
 cd rag
-python3 -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv
+. .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
-uvicorn app.main:app --host 0.0.0.0 --port 8001
+uvicorn app.main:app --host 127.0.0.1 --port 8001
 ```
 
-**Backend:**
-
-```bash
+```sh
 cd backend
-cp .env.example .env   # fill in TELEGRAM_BOT_TOKEN, GITHUB_*, GROQ_API_KEY, MONGODB_URI
-npm install
+npm ci
 npm run build
-node dist/index.js     # or: npm run dev (auto-reload)
+npm start
 ```
 
----
+The backend exposes `GET /health`, `GET /api/status`, `POST /api/reader` (JSON with a `message` string), `POST /api/sync`, and `POST /api/reset`. Direct API reset accepts an optional `content` string and acts immediately. Send the `x-api-key` header on all `/api/*` requests when a shared secret is configured. FastAPI exposes `/health`, `/index`, `/query`, and interactive documentation at `/docs`.
 
-## Environment Variables
+Run the backend checks with `npm test` and `npm run build` in `backend/`. Run `python -m pytest` in the activated `rag/` environment. The automated suites use fixtures and temporary indexes. They require no production credentials.
 
-### `backend/.env`
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | ✅ | — | Token from @BotFather |
-| `MONGODB_URI` | ✅ | — | MongoDB connection string |
-| `GITHUB_OWNER` | ✅ | — | GitHub username or org |
-| `GITHUB_REPO` | ✅ | — | Repository name |
-| `GITHUB_TOKEN` | ✅ | — | GitHub PAT with Contents read+write |
-| `GITHUB_BRANCH` | — | `main` | Branch to read/write README on |
-| `GROQ_API_KEY` | — | — | Enables LLM classification + answer synthesis |
-| `BACKEND_API_SECRET` | — | — | Shared secret for `/api/*` routes (`x-api-key` header) |
-| `TELEGRAM_ALLOWED_USER_IDS` | — | *(all)* | Comma-separated Telegram user IDs |
-| `RAG_SERVICE_URL` | — | — | Python RAG service URL (unset = local fallback) |
-
-### `rag/.env`
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `EMBEDDING_BACKEND` | — | `huggingface` | `huggingface` or `openai` |
-| `HUGGINGFACE_API_KEY` | — | — | Use HF hosted API (no local model download) |
-| `HUGGINGFACE_MODEL` | — | `sentence-transformers/all-MiniLM-L6-v2` | Embedding model |
-| `CHROMA_PERSIST_DIR` | — | `./data/chroma` | ChromaDB persistence directory |
-
----
-
-## Telegram Commands
-
-| Command | Description |
-|---|---|
-| `/help` | Show command reference |
-| `/status` | Health check — MongoDB, GitHub, RAG service, Groq |
-| `/sync` | Re-fetch README from GitHub and rebuild search index |
-| `/add <topic> [url] [description]` | Append a new entry |
-| `/update <topic> [url] [description]` | Update a matching entry in place |
-| `/delete <topic>` | Remove a matching entry |
-| `/get <topic>` | Semantic search |
-| `/reset CONFIRM` | Wipe the entire README (requires CONFIRM) |
-| *plain text* | Treated as a semantic search query |
-
-Aliases: `/create`, `/new` → add · `/edit` → update · `/remove` → delete · `/find`, `/search` → get
-
----
-
-## Testing
-
-### Backend — 37 tests (Vitest)
-
-```bash
-cd backend && npm install && npm test
-```
-
-Covers: README CRUD engine, heuristic intent classifier, hash-embedding fallback, RAG-service detection, `/api/reset` endpoint, `/reset` command parsing.
-
-### RAG Service — 23 tests (pytest)
-
-```bash
-cd rag
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-pytest
-```
-
-Covers: Markdown chunking, embedding backend selection/fallback, ChromaDB store operations, FastAPI endpoints end-to-end.
-
-Both suites are **fully self-contained** — no live credentials, database, or network access required.
-
----
-
-## Project Structure
-
-```
-.
-├── backend/
-│   ├── src/
-│   │   ├── apis/           # Express routes (reader, status, sync, reset)
-│   │   ├── middleware/      # x-api-key auth
-│   │   ├── models/          # Mongoose schema (audit log + vector index)
-│   │   ├── services/        # Bot, assistant orchestrator, RAG integration
-│   │   ├── types/           # Zod schemas + TypeScript types
-│   │   ├── utils/           # Classifier, GitHub API, CRUD engine, RAG client
-│   │   └── index.ts         # Express app + graceful shutdown
-│   ├── src/__tests__/       # Vitest unit tests
-│   ├── Dockerfile
-│   └── .env.example
-│
-├── rag/
-│   ├── app/
-│   │   ├── main.py          # FastAPI: /health, /index, /query
-│   │   ├── chunking.py      # Markdown → chunks
-│   │   ├── embeddings.py    # HF / OpenAI / hash fallback
-│   │   ├── store.py         # ChromaDB persistence
-│   │   └── schemas.py       # Pydantic models
-│   ├── tests/               # pytest tests
-│   ├── Dockerfile
-│   └── .env.example
-│
-└── docker-compose.yml       # mongo + rag + backend
-```
-
----
-
-## Troubleshooting
-
-| Symptom | Likely Cause |
-|---|---|
-| Bot doesn't respond | Wrong `TELEGRAM_BOT_TOKEN`, or another instance is polling with the same token |
-| `/status` shows GitHub not configured | Missing `GITHUB_OWNER` / `GITHUB_REPO` / `GITHUB_TOKEN` |
-| README writes fail with 404 | `GITHUB_BRANCH` doesn't exist, or token lacks write access |
-| RAG answers are generic | No `GROQ_API_KEY` — returning raw snippets instead of LLM answer |
-| Search results seem irrelevant | Hash fallback active instead of HF model — check `/status` |
-| First `/sync` is slow | Normal — local HF model downloads once (~90 MB) |
-| `docker compose up` fails on `rag` healthcheck | Heavy packages installing — increase `retries` in `docker-compose.yml` |
+To repeat the paraphrase check with the real MiniLM model already cached, run `HF_HUB_OFFLINE=1 RUN_LOCAL_MODEL_TESTS=1 python -m pytest` in the RAG environment.

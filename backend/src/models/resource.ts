@@ -60,3 +60,18 @@ const resourceSchema = new mongoose.Schema<IResource>(
 export const Resource: mongoose.Model<IResource> =
 	(mongoose.models.Resource as mongoose.Model<IResource> | undefined) ??
 	mongoose.model<IResource>("Resource", resourceSchema);
+
+const snapshotSchema = new mongoose.Schema({
+	_id: { type: String, required: true },
+	revision: { type: String, required: true },
+	dirty: { type: Boolean, default: false },
+	chunks: [new mongoose.Schema({
+		section: { type: String, required: true },
+		content: { type: String, required: true },
+		type: { type: String, required: true },
+		embedding: { type: String, required: true },
+	}, { _id: false })],
+});
+
+// One atomic replacement also represents a successfully indexed empty README.
+export const ReadmeIndex = mongoose.model("ReadmeIndex", snapshotSchema);

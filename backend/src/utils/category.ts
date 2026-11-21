@@ -1,4 +1,4 @@
-import { ChatGroq } from "@langchain/groq";
+import { groqModel } from "./groq.js";
 import * as z from "zod";
 
 export const ClassificationSchema = z.object({
@@ -18,8 +18,8 @@ export const ClassificationSchema = z.object({
 export type Classification = z.infer<typeof ClassificationSchema>;
 
 const intentKeywords: Array<{ pattern: RegExp; intent: "CREATE" | "READ" | "UPDATE" | "DELETE" }> = [
-	{ pattern: /^(?:\/add|\/create|\/new|\/insert|add|create|insert|append)\b/i, intent: "CREATE" },
-	{ pattern: /^(?:\/search|\/find|\/query|search|find|show|get|look up|lookup)\b/i, intent: "READ" },
+	{ pattern: /^(?:\/add|\/create|\/new|\/insert|add|create|insert|append|save|store|bookmark|remember|remind me to|note)\b/i, intent: "CREATE" },
+	{ pattern: /^(?:\/get|\/search|\/find|\/query|search|find|show|get|look up|lookup)\b/i, intent: "READ" },
 	{ pattern: /^(?:\/update|\/edit|\/replace|update|edit|replace|change)\b/i, intent: "UPDATE" },
 	{ pattern: /^(?:\/delete|\/remove|delete|remove|drop|erase)\b/i, intent: "DELETE" },
 ];
@@ -42,24 +42,15 @@ Return only JSON matching this shape:
 }
 
 Rules:
+- Omit unused optional fields. Never supply null or empty URLs.
 - CREATE means append a new link, note, or section entry to the README.
 - READ means semantic lookup / search.
 - UPDATE means modify an existing link, entry, or section.
 - DELETE means remove an existing link, entry, or section.
-- Extract URLs when present.
+- Keep the original facts, dates, names and URLs verbatim. Route reminders to Reminders, links to Links, other notes to Notes unless the user names a section. For updates, target identifies the old entry.
 - If the message looks like a slash command, set type to command.
 - If a user asks a question or wants to find information, prefer READ.
 `;
-
-/** Strips a leading `/command` or bare keyword (add, update, ...) off a message, returning the remaining argument text. */
-const stripLeadingToken = (value: string) => {
-	const match = value.match(/^\s*(?:\/)?[a-zA-Z]+\s*/);
-	if (!match) {
-		return value.trim();
-	}
-
-	return value.slice(match[0].length).trim();
-};
 
 /**
  * Best-effort parse of `<title> <url?> [- ]<description...>` style arguments,
@@ -72,7 +63,9 @@ const parseEntryArgs = (argsText: string, urls: string[]) => {
 
 	const firstUrl = urls[0];
 	if (firstUrl && argsText.includes(firstUrl)) {
-		const [beforeUrl, afterUrlRaw] = argsText.split(firstUrl);
+		const start = argsText.indexOf(firstUrl);
+		const beforeUrl = argsText.slice(0, start);
+		const afterUrlRaw = argsText.slice(start + firstUrl.length);
 		const title = beforeUrl?.trim().replace(/[-:]\s*$/, "").trim();
 		const afterUrl = afterUrlRaw?.trim().replace(/^[-:]\s*/, "").trim();
 		return {
@@ -81,7 +74,7 @@ const parseEntryArgs = (argsText: string, urls: string[]) => {
 		};
 	}
 
-	// No URL: treat text before the first " - " (or first few words) as the title.
+	// A spaced dash separates an optional title from a plain-text note.
 	const dashSplit = argsText.split(/\s+-\s+/);
 	if (dashSplit.length > 1) {
 		return { title: dashSplit[0]?.trim(), content: dashSplit.slice(1).join(" - ").trim() };
@@ -91,109 +84,73 @@ const parseEntryArgs = (argsText: string, urls: string[]) => {
 };
 
 const heuristicClassify = (message: string): Classification => {
-	const cleaned = message.trim();
-	const lower = cleaned.toLowerCase();
-	const matchedIntent = intentKeywords.find(({ pattern }) => pattern.test(cleaned))?.intent;
-	const extractedUrls = Array.from(cleaned.matchAll(/https?:\/\/[^\s)]+/g)).map(([value]) => value);
-
-	if (matchedIntent) {
-		const argsText = stripLeadingToken(cleaned);
-		const parsed = parseEntryArgs(argsText, extractedUrls);
-
-		return {
-			intent: matchedIntent,
-			type: cleaned.startsWith("/") ? "command" : "normal",
-			query: argsText || cleaned,
-			content: parsed.content || argsText || cleaned,
-			title: parsed.title,
-			target: parsed.title ?? argsText,
-			urls: extractedUrls.length > 0 ? extractedUrls : undefined,
-			commands: cleaned.startsWith("/") ? [cleaned.split(/\s+/)[0] ?? cleaned] : undefined,
-			confidence: 0.92,
-		};
-	}
-
-	if (/\?|find|search|show|get|details|related|similar|about/i.test(lower)) {
-		return {
-			intent: "READ" as const,
-			type: "normal" as const,
-			query: cleaned,
-			content: cleaned,
-			urls: extractedUrls.length > 0 ? extractedUrls : undefined,
-			confidence: 0.7,
-		};
-	}
-
-	// Greeting / social phrases and very short messages (< 20 chars with no URL)
-	// should NOT silently become README entries — the user is almost certainly
-	// not trying to save a knowledge-base item. Classify as READ so they get a
-	// "nothing found" reply rather than a phantom commit. When Groq is configured
-	// it can still override this if the message genuinely looks like a note.
-	const isGreeting = /^(hi|hey|hello|hola|yo|sup|greetings?|howdy|thanks?|thank\s+you|ok|okay|bye|good\s+(?:morning|afternoon|evening|night)|what'?s?\s+up)\b/i.test(
-		cleaned,
-	);
-	const isVeryShort = cleaned.length < 20 && extractedUrls.length === 0;
-
-	if (isGreeting || isVeryShort) {
-		return {
-			intent: "READ" as const,
-			type: "normal" as const,
-			query: cleaned,
-			content: cleaned,
-			urls: undefined,
-			confidence: 0.25,
-		};
-	}
+	const input = message.trim().replace(/^(\/\w+)@\w+\b/, "$1");
+	const direct = input.replace(/^(?:(?:can|could|would) you\s+)?(?:please\s+)?/i, "");
+	const cleaned = intentKeywords.some(({ pattern }) => pattern.test(direct)) ? direct : input;
+	const command = cleaned.startsWith("/");
+	const match = intentKeywords.find(({ pattern }) => pattern.test(cleaned));
+	const urls = cleaned.match(/https?:\/\/[^\s<>]+/gi) ?? [];
+	const rawArgs = match ? cleaned.replace(match.pattern, "").trim() : cleaned;
+	const named = /^(?:CREATE|UPDATE)$/.test(match?.intent ?? "") ? rawArgs.match(/^\[([^\]\n]+)\]\s+/) : null;
+	const args = named ? rawArgs.slice(named[0].length) : rawArgs;
+	const question = /\?$|^(?:who|what|when|where|why|which|how|can|could|do|does|did|is|are|have|has|tell me|list|recall|any (?:links|notes|reminders)|remind me (?:what|when|where|how))\b/i.test(cleaned);
+	const greeting = /^(?:hi|hey|hello|thanks?|thank you|ok|bye)[!. ]*$/i.test(cleaned);
+	const intent = match?.intent ?? (command || question || greeting ? "READ" : "CREATE");
+	const text = args.replace(/^(?:a note (?:that|about)|the (?:note|entry) (?:about|for)|that)\s+/i, "");
+	const parsed = parseEntryArgs(text, urls);
+	const target = parsed.title ?? text.replace(/^the\s+|\s+entry$/gi, "").trim();
 
 	return {
-		intent: "CREATE" as const,
-		type: "normal" as const,
-		query: cleaned,
-		content: cleaned,
-		urls: extractedUrls.length > 0 ? extractedUrls : undefined,
-		confidence: 0.5,
+		intent,
+		type: command ? "command" : "normal",
+		query: args,
+		content: parsed.content,
+		title: parsed.title,
+		target,
+		section: named?.[1] ?? (/^remind me\b|^reminder\b/i.test(args) || /^remind me\b/i.test(cleaned)
+			? "Reminders" : urls.length ? "Links" : "Notes"),
+		urls,
+		confidence: match ? 0.92 : 0.5,
 	};
-};
-
-const buildModel = () => {
-	const apiKey = process.env.GROQ_API_KEY ?? process.env.GROQ_API;
-
-	if (!apiKey) {
-		return null;
-	}
-
-	return new ChatGroq({
-		apiKey,
-		model: "openai/gpt-oss-20b",
-		temperature: 0,
-});
 };
 
 export const categorise = async (message: string): Promise<Classification> => {
 	const heuristic = heuristicClassify(message);
-	const model = buildModel();
+	if (heuristic.type === "command") {
+		if (!intentKeywords.some(({ pattern }) => pattern.test(message.trim()))) throw new Error("Unknown command. Send /help for examples.");
+		if (!heuristic.query) throw new Error("Include a topic or entry after the command.");
+		return heuristic;
+	}
+	const explicitIntent = intentKeywords.some(({ pattern }) => pattern.test(message.trim()));
+	const model = groqModel();
 
 	if (!model) {
 		return heuristic;
 	}
 
 	try {
-		const structuredModel = model.withStructuredOutput(ClassificationSchema);
+		const structuredModel = model.withStructuredOutput(ClassificationSchema, { method: "jsonMode" });
 		const response = await structuredModel.invoke([
 			{ role: "system", content: masterPrompt },
 			{ role: "user", content: message },
 		]);
 
+		const originalUrls = heuristic.urls ?? [];
+		const verbatim = response.content?.trim();
 		return {
 			...heuristic,
 			...response,
-			urls: response.urls ?? heuristic.urls,
+			intent: heuristic.intent === "READ" || explicitIntent ? heuristic.intent : response.intent,
+			url: response.url && originalUrls.includes(response.url) ? response.url : originalUrls[0],
+			urls: originalUrls,
 			commands: response.commands ?? heuristic.commands,
 			query: response.query ?? heuristic.query,
-			content: response.content ?? heuristic.content,
+			content: response.intent !== "CREATE" || (verbatim && message.includes(verbatim))
+				? response.content || heuristic.content : heuristic.content,
 			confidence: response.confidence ?? heuristic.confidence,
 		};
-	} catch {
+	} catch (error) {
+		console.warn("Groq classification unavailable, using rules.", error instanceof Error ? error.name : "unknown error");
 		return heuristic;
 	}
 };

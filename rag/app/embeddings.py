@@ -25,6 +25,7 @@ it's a coarse local baseline, not a state-of-the-art embedding.
 """
 
 import hashlib
+import logging
 import math
 import os
 import re
@@ -34,16 +35,17 @@ from typing import List
 HASH_DIMENSION = 256
 DEFAULT_HF_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
-_TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
+_STOP_WORDS = set("a an and are as at be by can do does did find for from get have how i in is it me my of on or our please related saved search show some that the there this to was we what when where which who with you about all tell list any anything".split())
 
 
-def _tokenize(text: str) -> List[str]:
-    return [tok for tok in _TOKEN_PATTERN.findall(text.lower()) if len(tok) > 2]
+def terms(text: str) -> list[str]:
+    words = re.findall(r"[^\W_]+", text.lower())
+    return [word.removesuffix("s") if len(word) > 4 else word for word in words if word not in _STOP_WORDS]
 
 
 def _hash_embed(text: str) -> List[float]:
     vector = [0.0] * HASH_DIMENSION
-    for token in _tokenize(text):
+    for token in terms(text):
         digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
         slot = int(digest, 16) % HASH_DIMENSION
         vector[slot] += 1.0
@@ -70,13 +72,12 @@ def _huggingface_inference_api_embed(texts: List[str]) -> List[List[float]]:
 
     api_key = os.environ["HUGGINGFACE_API_KEY"]
     model = _hf_model_name()
-    # url = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{model}"
     url = f"https://router.huggingface.co/hf-inference/models/{model}/pipeline/feature-extraction"
 
     response = requests.post(
         url,
         headers={"Authorization": f"Bearer {api_key}"},
-        json={"inputs": texts, "options": {"wait_for_model": True}},
+        json={"inputs": texts},
         timeout=30,
     )
     response.raise_for_status()
@@ -98,11 +99,16 @@ def _huggingface_inference_api_embed(texts: List[str]) -> List[List[float]]:
     return [pool(item) for item in data]
 
 
-@lru_cache(maxsize=1)
-def _openai_client():
-    from openai import OpenAI  # type: ignore
+def _openai_embed(texts):
+    import requests
 
-    return OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    response = requests.post(
+        "https://api.openai.com/v1/embeddings",
+        headers={"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"},
+        json={"model": "text-embedding-3-small", "input": texts}, timeout=30,
+    )
+    response.raise_for_status()
+    return [entry["embedding"] for entry in sorted(response.json()["data"], key=lambda e: e["index"])]
 
 
 def _configured_backend() -> str:
@@ -123,37 +129,47 @@ def embedding_backend_name() -> str:
     return "hashed-bag-of-words"
 
 
+HASH = "hashed-bag-of-words"
+
+
+def embed_batch(texts: list[str], preferred: str | None = None) -> tuple[str, list[list[float]]]:
+    """Return the identity of the encoder that actually produced these vectors."""
+    configured = embedding_backend_name()
+    requested = preferred or configured
+    if requested != configured and requested != HASH:
+        # A hosted index may already have fallen back to its matching local model.
+        local_for_hosted = configured.replace("huggingface-api:", "huggingface-local:")
+        if requested != local_for_hosted:
+            requested = HASH
+    providers = [requested]
+    if requested.startswith("huggingface-api:"):
+        providers.append(f"huggingface-local:{_hf_model_name()}")
+    if HASH not in providers:
+        providers.append(HASH)
+    for provider in providers:
+        if provider == HASH:
+            return HASH, [_hash_embed(text) for text in texts]
+        try:
+            if provider.startswith("openai:"):
+                if _configured_backend() != "openai":
+                    continue
+                vectors = _openai_embed(texts)
+            elif provider.split(":", 1)[1] != _hf_model_name():
+                continue
+            elif provider.startswith("huggingface-api:"):
+                vectors = _huggingface_inference_api_embed(texts)
+            else:
+                vectors = _local_hf_model().encode(texts, normalize_embeddings=True, show_progress_bar=False).tolist()
+            if len(vectors) != len(texts) or not all(v and len(v) == len(vectors[0]) and all(math.isfinite(x) for x in v) for v in vectors):
+                raise ValueError("Incomplete embedding response")
+            return provider, vectors
+        except Exception as error:
+            logging.warning("Embedding provider %s unavailable (%s)", provider, type(error).__name__)
+    raise RuntimeError("No embedding provider available")
+
+
 def embed_texts(texts: List[str]) -> List[List[float]]:
-    """Embeds a batch of texts, falling back gracefully if the configured
-    backend is unavailable at runtime (e.g. missing package, no network, or
-    an API error) so semantic search never hard-fails."""
-    if not texts:
-        return []
-
-    backend = _configured_backend()
-
-    if backend == "openai" and os.getenv("OPENAI_API_KEY"):
-        try:
-            client = _openai_client()
-            response = client.embeddings.create(model="text-embedding-3-small", input=texts)
-            return [item.embedding for item in response.data]
-        except Exception as error:  # noqa: BLE001 - deliberate broad fallback
-            print(f"[embeddings] OpenAI embedding failed, falling back: {error}")
-
-    if backend in ("huggingface", "sentence-transformers", ""):
-        if os.getenv("HUGGINGFACE_API_KEY"):
-            try:
-                return _huggingface_inference_api_embed(texts)
-            except Exception as error:  # noqa: BLE001 - deliberate broad fallback
-                print(f"[embeddings] Hugging Face Inference API failed, falling back: {error}")
-
-        try:
-            model = _local_hf_model()
-            return [vector.tolist() for vector in model.encode(texts)]
-        except Exception as error:  # noqa: BLE001 - deliberate broad fallback
-            print(f"[embeddings] Local Hugging Face model failed, falling back to hash embeddings: {error}")
-
-    return [_hash_embed(text) for text in texts]
+    return embed_batch(texts)[1] if texts else []
 
 
 def embed_text(text: str) -> List[float]:

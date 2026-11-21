@@ -22,6 +22,21 @@ const sectionHeading = (title: string) => `## ${title.trim()}`;
 
 const headingLevel = (line: string) => line.match(headingPattern)?.[1]?.length ?? 0;
 
+// A heading or bullet inside a fenced example is literal text.
+const markdownLines = (lines: string[]) => {
+	let fence = "";
+	return lines.map((line) => {
+		const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+		if (!fence && marker?.[1]) {
+			fence = marker[1];
+			return "";
+		}
+		if (!fence) return line;
+		if (marker?.[1]?.startsWith(fence) && !marker[2]?.trim()) fence = "";
+		return "";
+	});
+};
+
 export const buildReadmeChunks = (content: string): ReadmeChunk[] => {
 	const lines = content.split(/\r?\n/);
 	const chunks: ReadmeChunk[] = [];
@@ -30,7 +45,7 @@ export const buildReadmeChunks = (content: string): ReadmeChunk[] => {
 
 	const flushSection = () => {
 		const sectionText = sectionBuffer.join("\n").trim();
-		if (sectionText.length > 0) {
+		if (sectionBuffer.some((line) => line.trim() && !headingPattern.test(line))) {
 			chunks.push({
 				id: `section-${chunks.length}`,
 				section: currentSection,
@@ -42,7 +57,9 @@ export const buildReadmeChunks = (content: string): ReadmeChunk[] => {
 		sectionBuffer = [];
 	};
 
-	for (const line of lines) {
+	const structuralLines = markdownLines(lines);
+	for (const [index, raw] of lines.entries()) {
+		const line = structuralLines[index] ?? "";
 		if (headingPattern.test(line)) {
 			flushSection();
 			currentSection = line.replace(headingPattern, "$2").trim();
@@ -50,7 +67,7 @@ export const buildReadmeChunks = (content: string): ReadmeChunk[] => {
 			continue;
 		}
 
-		sectionBuffer.push(line);
+		sectionBuffer.push(raw);
 
 		if (bulletPattern.test(line)) {
 			const bulletText = line.replace(bulletPattern, "$1").trim();
@@ -82,23 +99,14 @@ const findHeadingIndex = (lines: string[], title: string) => {
 };
 
 const findSectionEndIndex = (lines: string[], headingIndex: number) => {
-	const level = headingLevel(lines[headingIndex] ?? "");
 	for (let index = headingIndex + 1; index < lines.length; index += 1) {
-		const line = lines[index] ?? "";
-		if (!headingPattern.test(line)) {
-			continue;
-		}
-
-		if (headingLevel(line) <= level) {
-			return index;
-		}
+		if (headingLevel(lines[index] ?? "")) return index;
 	}
-
 	return lines.length;
 };
 
 const ensureSection = (lines: string[], title: string) => {
-	const headingIndex = findHeadingIndex(lines, title);
+	const headingIndex = findHeadingIndex(markdownLines(lines), title);
 	if (headingIndex >= 0) {
 		return { lines, headingIndex, created: false };
 	}
@@ -121,9 +129,11 @@ export const formatReadmeEntry = ({
 	url?: string | undefined;
 	content: string;
 }) => {
+	content = content.replace(/\s+/g, " ").trim();
+	title = title?.replace(/\s+/g, " ").trim();
 	if (title && url) {
 		const suffix = content && normalize(content) !== normalize(title) ? ` - ${content}` : "";
-		return `- [${title}](${url})${suffix}`;
+		return `- [${title.replace(/[\[\]]/g, "\\$&")}](${url.replace(/\(/g, "%28").replace(/\)/g, "%29")})${suffix}`;
 	}
 
 	if (url) {
@@ -148,34 +158,44 @@ export const appendReadmeEntry = (
 	const ensured = ensureSection(initialLines, section);
 	const lines = [...ensured.lines];
 	const headingIndex = ensured.headingIndex;
-	const insertAt = findSectionEndIndex(lines, headingIndex);
-
-	const sectionLines = lines.slice(headingIndex + 1, insertAt);
-	const needsLeadingBlank = sectionLines.length > 0 && (sectionLines[sectionLines.length - 1]?.trim().length ?? 0) > 0;
-	const insertion: string[] = [];
-
-	if (needsLeadingBlank) {
-		insertion.push("");
+	const structural = markdownLines(lines);
+	let insertAt = findSectionEndIndex(structural, headingIndex);
+	if (structural.slice(headingIndex + 1, insertAt).includes(entryLine)) {
+		return { content, changed: false, message: `Entry already saved in ${section}` };
 	}
-
-	insertion.push(entryLine, "");
-	lines.splice(insertAt, 0, ...insertion);
+	while (insertAt > headingIndex + 1 && !lines[insertAt - 1]?.trim()) insertAt--;
+	const leading = bulletPattern.test(lines[insertAt - 1] ?? "") ? [] : [""];
+	const needsBlank = insertAt === lines.length || Boolean(lines[insertAt]?.trim());
+	lines.splice(insertAt, 0, ...leading, entryLine, ...(needsBlank ? [""] : []));
+	if (lines[lines.length - 1] !== "") lines.push("");
 
 	return {
-		content: lines.join("\n").replace(/\n{3,}/g, "\n\n"),
+		content: lines.join(content.includes("\r\n") ? "\r\n" : "\n"),
 		changed: true,
 		message: `Inserted entry into ${section}`,
 	};
 };
 
-const isContentLine = (line: string) => {
-	const trimmed = line.trim();
-	return trimmed.startsWith("-") || trimmed.startsWith("*") || /^\d+\./.test(trimmed);
-};
+const words = (value: string): string[] => normalize(value).match(/[\p{L}\p{N}]+/gu) ?? [];
 
-const matchesTokens = (line: string, tokens: string[]) => {
-	const normalizedLine = normalize(line);
-	return tokens.some((token) => token.length > 0 && normalizedLine.includes(normalize(token)));
+const findEntry = (lines: string[], tokens: string[]) => {
+	const bullets = markdownLines(lines).map((line) => line.match(bulletPattern)?.[1]);
+	for (const token of tokens.filter((value) => value.trim())) {
+		const target = words(token);
+		if (!target.length) continue;
+		const exact: number[] = [];
+		const partial: number[] = [];
+		bullets.forEach((body, index) => {
+			if (!body) return;
+			const title = body.match(linkPattern)?.[1] ?? body.split(" - ")[0] ?? body;
+			if (normalize(title) === normalize(token)) exact.push(index);
+			else if (target.every((word) => words(body).includes(word))) partial.push(index);
+		});
+		const matches = exact.length ? exact : partial;
+		if (matches.length > 1) throw new Error("Several README entries match. Use a more specific title or URL.");
+		if (matches[0] !== undefined) return matches[0];
+	}
+	return -1;
 };
 
 export const replaceReadmeEntry = (
@@ -184,7 +204,7 @@ export const replaceReadmeEntry = (
 	replacementLine: string,
 ): ReadmeMutation => {
 	const lines = content.split(/\r?\n/);
-	const entryIndex = lines.findIndex((line) => isContentLine(line) && matchesTokens(line, tokens));
+	const entryIndex = findEntry(lines, tokens);
 
 	if (entryIndex < 0) {
 		return {
@@ -196,7 +216,7 @@ export const replaceReadmeEntry = (
 
 	lines[entryIndex] = replacementLine;
 	return {
-		content: lines.join("\n").replace(/\n{3,}/g, "\n\n"),
+		content: lines.join(content.includes("\r\n") ? "\r\n" : "\n"),
 		changed: true,
 		message: "Updated the matching README entry",
 	};
@@ -204,7 +224,7 @@ export const replaceReadmeEntry = (
 
 export const removeReadmeEntry = (content: string, tokens: string[]) => {
 	const lines = content.split(/\r?\n/);
-	const entryIndex = lines.findIndex((line) => isContentLine(line) && matchesTokens(line, tokens));
+	const entryIndex = findEntry(lines, tokens);
 
 	if (entryIndex < 0) {
 		return {
@@ -216,12 +236,8 @@ export const removeReadmeEntry = (content: string, tokens: string[]) => {
 
 	lines.splice(entryIndex, 1);
 
-	while (lines.length > 0 && lines[lines.length - 1]?.trim().length === 0) {
-		lines.pop();
-	}
-
 	return {
-		content: lines.join("\n").replace(/\n{3,}/g, "\n\n"),
+		content: lines.join(content.includes("\r\n") ? "\r\n" : "\n"),
 		changed: true,
 		message: "Removed the matching README entry",
 	};

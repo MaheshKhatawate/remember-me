@@ -2,12 +2,13 @@
   "name": "backend",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "dist/index.js",
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
     "build": "tsc -b",
-    "dev": "tsc -b && nodemon ./dist/index.js"
+    "start": "node dist/index.js",
+    "dev": "nodemon --watch src --ext ts --exec \"tsc -b && node dist/index.js\""
   },
   "keywords": [],
   "author": "",
@@ -16,6 +17,7 @@
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/node": "^25.9.2",
+    "nodemon": "^3.1.14",
     "typescript": "^6.0.3",
     "vitest": "^2.1.9"
   },
@@ -29,7 +31,6 @@
     "express": "^5.2.1",
     "langchain": "^1.4.5",
     "mongoose": "^9.6.3",
-    "nodemon": "^3.1.14",
     "telegraf": "^4.16.3",
     "zod": "^4.4.3"
   }

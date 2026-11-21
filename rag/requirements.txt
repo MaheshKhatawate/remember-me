@@ -10,10 +10,9 @@ requests==2.32.3
 # HUGGINGFACE_API_KEY is not set (falls back to the hosted Inference API
 # instead if you'd rather not install this locally).
 sentence-transformers==3.3.1
+# Chroma 0.5 uses tokenizers 0.20.x.
+transformers==4.46.3
 
 # Testing
 pytest==8.3.4
 httpx==0.27.2
-
-# Optional alternative embedding backend (opt-in via EMBEDDING_BACKEND=openai):
-# openai==1.57.0

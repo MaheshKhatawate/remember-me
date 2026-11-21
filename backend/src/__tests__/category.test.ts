@@ -52,3 +52,11 @@ describe("categorise (heuristic fallback)", () => {
 		expect(result.urls).toEqual(["https://a.com", "https://b.com"]);
 	});
 });
+
+it("routes reminders, short notes and named sections without an LLM", async () => {
+	expect(await categorise("Buy milk")).toMatchObject({ intent: "CREATE", section: "Notes" });
+	expect(await categorise("Remind me to buy milk")).toMatchObject({ intent: "CREATE", section: "Reminders", content: "buy milk" });
+	expect(await categorise("/add@test_bot [Books] Dune - Frank Herbert")).toMatchObject({ section: "Books", title: "Dune", content: "Frank Herbert" });
+	expect(await categorise("Where did I leave my keys")).toMatchObject({ intent: "READ" });
+	await expect(categorise("/add")).rejects.toThrow(/include/i);
+});

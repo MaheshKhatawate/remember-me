@@ -32,7 +32,7 @@ def build_readme_chunks(content: str) -> List[ReadmeChunk]:
     def flush_section() -> None:
         nonlocal section_buffer
         section_text = "\n".join(section_buffer).strip()
-        if section_text:
+        if any(line.strip() and not HEADING_PATTERN.match(line) for line in section_buffer):
             chunks.append(
                 ReadmeChunk(
                     id=f"section-{len(chunks)}",
@@ -44,7 +44,18 @@ def build_readme_chunks(content: str) -> List[ReadmeChunk]:
             )
         section_buffer = []
 
+    fence = ""
     for line in lines:
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if fence:
+            if marker and marker[1].startswith(fence) and not marker[2].strip():
+                fence = ""
+            section_buffer.append(line)
+            continue
+        if marker:
+            fence = marker[1]
+            section_buffer.append(line)
+            continue
         heading_match = HEADING_PATTERN.match(line)
         if heading_match:
             flush_section()

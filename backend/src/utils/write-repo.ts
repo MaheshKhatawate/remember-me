@@ -1,7 +1,9 @@
 import axios from "axios";
+import { githubError } from "./github-repo.js";
 
 export type WriteRepoInput = {
 	content: string;
+	sha: string | undefined;
 	owner?: string;
 	repo?: string;
 	token?: string;
@@ -27,6 +29,7 @@ const toBase64 = (value: string) => Buffer.from(value, "utf8").toString("base64"
 
 export const writeRepo = async ({
 	content,
+	sha,
 	owner = process.env.GITHUB_OWNER,
 	repo = process.env.GITHUB_REPO,
 	token = process.env.GITHUB_TOKEN,
@@ -40,28 +43,6 @@ export const writeRepo = async ({
 
 	const filePath = encodeRepoPath(path);
 	const contentsUrl = `${githubApiBaseUrl}/repos/${owner}/${repo}/contents/${filePath}`;
-	let sha: string | undefined;
-
-	try {
-		const existingFile = await axios.get(contentsUrl, {
-			headers: {
-				Authorization: `Bearer ${token}`,
-				Accept: "application/vnd.github+json",
-				"X-GitHub-Api-Version": "2022-11-28",
-				"User-Agent": "remember-me-backend",
-			},
-			params: {
-				ref: branch,
-			},
-		});
-
-		sha = existingFile.data?.sha;
-	} catch (error) {
-		if (!axios.isAxiosError(error) || error.response?.status !== 404) {
-			throw error;
-		}
-	}
-
 	const response = await axios.put(
 		contentsUrl,
 		{
@@ -71,6 +52,7 @@ export const writeRepo = async ({
 			...(sha ? { sha } : {}),
 		},
 		{
+			timeout: 20000,
 			headers: {
 				Authorization: `Bearer ${token}`,
 				Accept: "application/vnd.github+json",
@@ -78,7 +60,7 @@ export const writeRepo = async ({
 				"User-Agent": "remember-me-backend",
 			},
 		},
-	);
+	).catch(githubError);
 
 	return {
 		path,

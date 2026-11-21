@@ -1,6 +1,8 @@
 import express from "express";
+import { withReadme } from "../services/readme-queue.js";
+import { readRepoFile } from "../utils/github-repo.js";
 import { writeRepo } from "../utils/write-repo.js";
-import { syncReadmeIndex } from "../services/rag.js";
+import { markReadmeIndexDirty, syncReadmeIndex } from "../services/rag.js";
 
 const router = express.Router();
 
@@ -13,15 +15,20 @@ const router = express.Router();
  */
 router.post("/reset", async (req, res) => {
 	try {
-		const content = typeof req.body?.content === "string" ? req.body.content : "";
-
-		const repoWrite = await writeRepo({
-			content,
-			path: "README.md",
-			commitMessage: "RESET README content via Telegram",
+		if (req.body?.content !== undefined && typeof req.body.content !== "string") {
+			return res.status(400).json({ message: "Replacement content must be a string." });
+		}
+		const content = req.body?.content ?? "";
+		const { repoWrite, indexResult } = await withReadme(async () => {
+			const file = await readRepoFile({ allowMissing: true });
+			await markReadmeIndexDirty();
+			const repoWrite = content === file.content && file.sha ? file : await writeRepo({
+				content, path: file.path, branch: file.branch, sha: file.sha,
+				commitMessage: "RESET README entry from Telegram",
+			});
+			const indexResult = await syncReadmeIndex(content);
+			return { repoWrite, indexResult };
 		});
-
-		const indexResult = await syncReadmeIndex(content);
 
 		return res.status(200).json({
 			message:

@@ -16,7 +16,6 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException
 
-from .embeddings import embedding_backend_name
 from .schemas import HealthResponse, IndexRequest, IndexResponse, QueryRequest, QueryResponse, SearchResult
 from . import store
 
@@ -41,13 +40,13 @@ app = FastAPI(
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     try:
-        indexed = store.indexed_source_count()
-    except Exception:
-        indexed = 0
+        indexed, backend = store.index_status()
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="Vector store unavailable") from error
 
     return HealthResponse(
         status="ok",
-        embedding_backend=embedding_backend_name(),
+        embedding_backend=backend,
         vector_store="chromadb",
         indexed_sources=indexed,
     )
@@ -70,10 +69,10 @@ def index(payload: IndexRequest) -> IndexResponse:
 @app.post("/query", response_model=QueryResponse)
 def query(payload: QueryRequest) -> QueryResponse:
     try:
-        raw_results = store.query(payload.source_path, payload.query, payload.top_k)
+        revision, raw_results = store.query_version(payload.source_path, payload.query, payload.top_k)
     except Exception as error:  # noqa: BLE001
         logger.error("Query failed for %s:\n%s", payload.source_path, traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Query failed: {error}") from error
 
     results = [SearchResult(**item) for item in raw_results]
-    return QueryResponse(query=payload.query, results=results)
+    return QueryResponse(query=payload.query, revision=revision, results=results)

@@ -1,6 +1,13 @@
 import axios from "axios";
 
 const githubApiBaseUrl = "https://api.github.com";
+export const githubError = (error: unknown): never => {
+	if (!axios.isAxiosError(error)) throw error;
+	const status = error.response?.status;
+	const detail = status === 409 ? "The README changed on GitHub. Retry using the latest version."
+		: error.response?.data?.message || error.message;
+	throw new Error(`GitHub${status ? " " + status : ""}: ${detail}`);
+};
 
 const encodeRepoPath = (path: string) => path.split("/").map((segment) => encodeURIComponent(segment)).join("/");
 
@@ -27,12 +34,14 @@ export const readRepoFile = async ({
 	token = process.env.GITHUB_TOKEN,
 	branch = process.env.GITHUB_BRANCH ?? "main",
 	path = "README.md",
+	allowMissing = false,
 }: {
 	owner?: string;
 	repo?: string;
 	token?: string;
 	branch?: string;
 	path?: string;
+	allowMissing?: boolean;
 } = {}): Promise<RepoFileResult> => {
 	if (!owner || !repo || !token) {
 		throw new Error("GITHUB_OWNER, GITHUB_REPO, and GITHUB_TOKEN must be configured");
@@ -40,9 +49,16 @@ export const readRepoFile = async ({
 
 	const contentsUrl = `${githubApiBaseUrl}/repos/${owner}/${repo}/contents/${encodeRepoPath(path)}`;
 	const response = await axios.get(contentsUrl, {
+		timeout: 15000,
+		validateStatus: (status) => status === 200 || (allowMissing && status === 404),
 		headers: repoHeaders(token),
 		params: { ref: branch },
-	});
+	}).catch(githubError);
+
+	if (response.status === 404) return { path, branch, content: "" };
+	if (!response.data?.sha || response.data.encoding !== "base64" || typeof response.data.content !== "string") {
+		throw new Error("GitHub did not return a readable base64 file. Check the README size and path.");
+	}
 
 	return {
 		path,
