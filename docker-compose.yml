@@ -22,8 +22,10 @@ services:
       - ./rag/.env
     environment:
       CHROMA_PERSIST_DIR: /data/chroma
+      HF_HOME: /data/models
     volumes:
       - chroma-data:/data/chroma
+      - model-cache:/data/models
     ports:
       - "8001:8001"
     healthcheck:
@@ -39,8 +41,6 @@ services:
     restart: unless-stopped
     depends_on:
       mongo:
-        condition: service_healthy
-      rag:
         condition: service_healthy
     env_file:
       - ./backend/.env
@@ -60,3 +60,4 @@ services:
 volumes:
   mongo-data:
   chroma-data:
+  model-cache:

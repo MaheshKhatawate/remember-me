@@ -1,17 +1,18 @@
 import { Telegraf } from "telegraf";
 import axios from "axios";
+import { Resource } from "../models/resource.js";
 import { configDotenv } from "dotenv";
 
 configDotenv({ quiet: true });
 
-export const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN!);
+export const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN!, { handlerTimeout: Infinity });
 const backendUrl = process.env.BACKEND_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3000}`;
 const apiSecret = process.env.BACKEND_API_SECRET;
 
 const client = axios.create({
 	baseURL: backendUrl,
 	headers: apiSecret ? { "x-api-key": apiSecret } : {},
-	timeout: 30000, // 30 s — enough for first-time RAG warm-up without re-indexing on every read
+	timeout: 0, // Keep the reply tied to the actual commit/index result.
 });
 
 // Optional access control: if TELEGRAM_ALLOWED_USER_IDS is set, only those
@@ -37,6 +38,13 @@ bot.use(async (ctx, next) => {
 		await ctx.reply("You're not authorized to use this bot. Ask the owner to add your Telegram user ID to TELEGRAM_ALLOWED_USER_IDS.");
 		return;
 	}
+	if (ctx.message && "text" in ctx.message) {
+		const command = ctx.message.text.match(/^\/(help|start|status|sync|reset)(?:@\w+)?(?:\s|$)/i);
+		if (command?.[1]) {
+			await Resource.create({ kind: "audit", sourcePath: "telegram", intent: command[1].toUpperCase(),
+				content: ctx.message.text }).catch(() => console.error("Could not record Telegram control command"));
+		}
+	}
 	return next();
 });
 
@@ -49,11 +57,12 @@ const helpText = [
 	"\"What links do I have about Docker?\" — searches semantically",
 	"\"Add a note about React\" — creates an entry",
 	"\"Remove the Kubernetes entry\" — deletes a matching entry",
-	"Any plain-text message (no `/`) is treated as a smart search or instruction.",
+	"Send a note or URL to save it. Remind me to ... saves a searchable reminder.",
 	"",
 	"*CRUD slash commands*",
 	"`/add <topic> [url] [description]` – append a new entry",
 	"  _Example:_ `/add Docker https://docker.com Container platform`",
+	"`/add [Books] Invisible Cities - Italo Calvino` – choose a section",
 	"`/update <topic> [url] [description]` – update a matching entry in place",
 	"`/delete <topic>` – remove a matching entry",
 	"`/get <topic>` (or `/find`, `/search`) – search for an entry",
@@ -68,29 +77,28 @@ const helpText = [
 	"`/help` – show this message",
 ].join("\n");
 
-// Forwards a raw message to the backend's classifier/CRUD pipeline and
-// relays the result back to the user. Shared by both the free-form text
-// handler and every CRUD slash command below.
+const errorDetail = (err: unknown) => {
+	if (axios.isAxiosError(err) && typeof err.response?.data?.message === "string") return err.response.data.message;
+	return err instanceof Error ? err.message : "Backend unavailable";
+};
+
 const forwardToBackend = async (ctx: { reply: (text: string) => Promise<unknown> }, content: string) => {
-	const response = await client
-		.post<{ message: string; result?: unknown }>("/api/reader", { message: content })
-		.catch((err) => {
-			console.error("Failed to process message", err instanceof Error ? err.message : err);
-			return null;
-		});
-
-	if (!response) {
-		await ctx.reply("Sorry, something went wrong while processing that. Try /status to check the backend.");
-		return;
+	let answer: string;
+	try {
+		const { data } = await client.post<{ message: string }>("/api/reader", { message: content });
+		answer = data.message;
+	} catch (err) {
+		answer = errorDetail(err);
 	}
-
-	await ctx.reply(response.data.message);
+	// Telegram caps text messages at 4096 characters. Split on Unicode code points.
+	const parts = answer.match(/[\s\S]{1,2000}/gu) ?? [];
+	for (const part of parts) await ctx.reply(part);
 };
 
 // Register commands with Telegram so they appear in the "/" autocomplete menu.
 // This is fire-and-forget — if it fails (e.g. no network at startup) the bot
 // still works fine; the menu just won't show the command list.
-void bot.telegram
+export const registerCommands = () => bot.telegram
 	.setMyCommands([
 		{ command: "help", description: "Show command reference" },
 		{ command: "start", description: "Show command reference" },
@@ -105,7 +113,7 @@ void bot.telegram
 		{ command: "search", description: "Semantic search: /search <topic>" },
 	])
 	.catch((err: unknown) =>
-		console.warn("Could not register bot commands with Telegram:", err instanceof Error ? err.message : err),
+		console.warn("Could not register bot commands with Telegram:", err instanceof Error ? err.name : "registration failed"),
 	);
 
 bot.command("help", async (ctx) => {
@@ -121,22 +129,22 @@ bot.command("status", async (ctx) => {
 		const response = await client.get("/api/status");
 		const data = response.data;
 		const lines = [
-			"*Status*",
+			"Status",
 			`Uptime: ${data.uptimeSeconds}s`,
 			`MongoDB: ${data.mongo?.connected ? "connected" : `not connected (${data.mongo?.state})`}`,
 			`GitHub: ${data.github?.configured ? `configured (${data.github.owner}/${data.github.repo}@${data.github.branch})` : "not configured"}`,
 			`RAG service: ${
 				data.ragService?.configured
 					? data.ragService.reachable
-						? "reachable"
-						: `configured but unreachable (${data.ragService.detail ?? "unknown error"})`
+						? data.ragService.detail ?? "reachable"
+						: `using local fallback (${data.ragService.detail ?? "unknown error"})`
 					: "not configured (using local fallback index)"
 			}`,
 			`Groq LLM: ${data.groqConfigured ? "configured" : "not configured (using heuristic classifier / raw context)"}`,
 		];
-		await ctx.replyWithMarkdown(lines.join("\n"));
+		await ctx.reply(lines.join("\n"));
 	} catch (err) {
-		await ctx.reply(`Failed to fetch status: ${err instanceof Error ? err.message : "unknown error"}`);
+		await ctx.reply(`Failed to fetch status: ${errorDetail(err)}`);
 	}
 });
 
@@ -146,7 +154,7 @@ bot.command("sync", async (ctx) => {
 		const response = await client.post("/api/sync");
 		await ctx.reply(response.data?.message ?? "Sync complete.");
 	} catch (err) {
-		await ctx.reply(`Sync failed: ${err instanceof Error ? err.message : "unknown error"}`);
+		await ctx.reply(`Sync failed: ${errorDetail(err)}`);
 	}
 });
 
@@ -157,8 +165,8 @@ bot.command("sync", async (ctx) => {
  */
 export const parseResetCommand = (text: string) => {
 	const args = text.replace(/^\/reset(?:@\S+)?\s*/i, "");
-	const confirmed = /^CONFIRM\b/i.test(args.trim());
-	const replacementContent = confirmed ? args.replace(/^CONFIRM\b\s*/i, "") : "";
+	const confirmed = /^CONFIRM(?:\s|$)/i.test(args.trim());
+	const replacementContent = confirmed ? args.replace(/^CONFIRM(?:\s+|$)/i, "") : "";
 	return { confirmed, replacementContent };
 };
 
@@ -183,7 +191,7 @@ bot.command("reset", async (ctx) => {
 		const response = await client.post("/api/reset", { content: replacementContent });
 		await ctx.reply(response.data?.message ?? "README has been reset.");
 	} catch (err) {
-		await ctx.reply(`Reset failed: ${err instanceof Error ? err.message : "unknown error"}`);
+		await ctx.reply(`Reset failed: ${errorDetail(err)}`);
 	}
 });
 

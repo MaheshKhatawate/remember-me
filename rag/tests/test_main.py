@@ -63,3 +63,17 @@ def test_query_endpoint_before_indexing_returns_empty(client):
     )
     assert response.status_code == 200
     assert response.json()["results"] == []
+
+
+def test_query_returns_only_supported_entries_and_their_revision(client):
+    import hashlib
+
+    client.post("/index", json={"content": README})
+    result = client.post("/query", json={"query": "Which links cover orchestration?"}).json()
+    assert result["revision"] == hashlib.sha256(README.encode()).hexdigest()
+    assert [r["content"] for r in result["results"]] == [
+        "[Kubernetes](https://kubernetes.io) - Container orchestration"
+    ]
+    assert client.post("/query", json={"query": "Which links cover astronomy?"}).json()["results"] == []
+    client.post("/index", json={"content": ""})
+    assert client.post("/query", json={"query": "Kubernetes"}).json()["results"] == []

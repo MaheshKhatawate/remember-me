@@ -1,6 +1,8 @@
 import express from "express";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("../utils/github-repo.js", () => ({ readRepoFile: async () => ({ path: "README.md", branch: "main", sha: "old", content: "previous" }) }));
+
 const writeRepoMock = vi.fn();
 const syncReadmeIndexMock = vi.fn();
 
@@ -9,6 +11,7 @@ vi.mock("../utils/write-repo.js", () => ({
 }));
 
 vi.mock("../services/rag.js", () => ({
+	markReadmeIndexDirty: vi.fn(),
 	syncReadmeIndex: (...args: unknown[]) => syncReadmeIndexMock(...args),
 }));
 
@@ -21,7 +24,8 @@ const buildApp = async () => {
 };
 
 const postJson = async (app: express.Express, path: string, body: unknown) => {
-	const server = app.listen(0);
+	const server = app.listen(0, "127.0.0.1");
+	await new Promise<void>((resolve) => server.once("listening", resolve));
 	const address = server.address();
 	const port = typeof address === "object" && address ? address.port : 0;
 

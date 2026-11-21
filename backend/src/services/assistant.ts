@@ -1,135 +1,79 @@
 import { Resource } from "../models/resource.js";
-import { categorise } from "../utils/category.js";
+import { categorise, type Classification } from "../utils/category.js";
 import { readRepoFile } from "../utils/github-repo.js";
 import { writeRepo } from "../utils/write-repo.js";
-import {
-	appendReadmeEntry,
-	compactReadmeText,
-	formatReadmeEntry,
-	removeReadmeEntry,
-	replaceReadmeEntry,
-} from "../utils/readme-markdown.js";
-import { answerWithContext, searchReadme, syncReadmeIndex } from "./rag.js";
+import { appendReadmeEntry, formatReadmeEntry, removeReadmeEntry, replaceReadmeEntry } from "../utils/readme-markdown.js";
+import { answerWithContext, markReadmeIndexDirty, searchReadme, syncReadmeIndex } from "./rag.js";
+import { withReadme } from "./readme-queue.js";
 
-const defaultSection = "Links";
-
-const toText = (value: unknown) => (typeof value === "string" ? value.trim() : "");
-
-const pickTokens = (classification: Record<string, unknown>, fallback: string) => {
-	const tokens = [
-		toText(classification.title),
-		toText(classification.target),
-		toText(classification.section),
-		toText(classification.url),
-		toText(classification.query),
-		fallback,
-	].filter((token) => token.length > 0);
-
-	const urls = Array.isArray(classification.urls) ? classification.urls.filter((token): token is string => typeof token === "string") : [];
-	return [...tokens, ...urls];
-};
-
-const formatResultMessage = (intent: string, detail: string) => {
-	switch (intent) {
-		case "CREATE":
-			return `README updated: ${detail}`;
-		case "UPDATE":
-			return `README entry updated: ${detail}`;
-		case "DELETE":
-			return `README entry removed: ${detail}`;
-		default:
-			return detail;
+const mutate = async (item: Classification) => {
+	const file = await readRepoFile({ allowMissing: item.intent === "CREATE" || item.intent === "UPDATE" });
+	const url = item.url || item.urls?.[0];
+	const section = item.section?.replace(/\s+/g, " ").trim() || (url ? "Links" : "Notes");
+	const content = item.content?.trim() || item.title || url;
+	const targets = [item.target || item.title, url].filter((value): value is string => Boolean(value));
+	const current = file.content;
+	let mutation;
+	if (item.intent === "DELETE") {
+		mutation = removeReadmeEntry(current, targets);
+	} else {
+		if (!content) throw new Error("Include the note, reminder or link you want to save.");
+		const entry = formatReadmeEntry({ title: item.title, url, content });
+		const initial = current || "# Second Brain\n";
+		if (item.intent === "UPDATE") {
+			mutation = replaceReadmeEntry(initial, targets, entry);
+			if (!mutation.changed) {
+				mutation = appendReadmeEntry(initial, section, entry);
+				mutation.message = `No entry matched. Added the entry to ${section} instead.`;
+			}
+		} else {
+			mutation = appendReadmeEntry(initial, section, entry);
+		}
 	}
+	const updatedReadme = mutation.content;
+	if (updatedReadme === current) {
+		const message = item.intent === "UPDATE" && mutation.changed ? "The matching README entry is already up to date." : mutation.message;
+		return { message, updatedReadme };
+	}
+	await markReadmeIndexDirty();
+	const repoWrite = await writeRepo({
+		content: updatedReadme, path: file.path, branch: file.branch, sha: file.sha,
+		commitMessage: `${item.intent} README entry from Telegram`,
+	});
+	try {
+		await syncReadmeIndex(updatedReadme);
+	} catch {
+		mutation.message += ". Saved to GitHub, but indexing failed. Run /sync to rebuild search.";
+	}
+	const labels = { CREATE: "README updated", UPDATE: "README entry updated", DELETE: "README entry removed", READ: "" };
+	return { message: `${labels[item.intent]}: ${mutation.message}`, repoWrite, updatedReadme };
 };
 
 export const processMessage = async (message: string) => {
-	const classification = await categorise(message);
-	const intent = toText(classification.intent) || "READ";
-	const readmeFile = await readRepoFile({ path: "README.md" }).catch(() => ({ content: "", branch: process.env.GITHUB_BRANCH ?? "main", path: "README.md" }));
-	const currentReadme = compactReadmeText(readmeFile.content ?? "");
-	const section = toText(classification.section) || defaultSection;
-	const title = toText(classification.title) || toText(classification.target) || undefined;
-	const url = toText(classification.url) || (Array.isArray(classification.urls) ? classification.urls.find((value) => typeof value === "string" && value.length > 0) : undefined);
-	const content = toText(classification.content) || toText(classification.query) || message;
-
-	if (intent === "READ") {
-		// The index is rebuilt after every mutation (CREATE/UPDATE/DELETE/RESET) and
-		// via the explicit /sync command. Re-indexing on every read query is expensive
-		// and causes timeouts — just query whatever is already indexed.
-		const results = await searchReadme(content || message);
-		const answer = await answerWithContext(content || message, results);
-
-		await Resource.create({
-			kind: "audit",
-			sourcePath: "telegram",
-			intent,
-			content: message,
-			metadata: { classification, results },
-		});
-
-		return {
-			intent,
-			classification,
-			message: formatResultMessage(intent, answer),
-			searchResults: results,
-		};
-	}
-
-	let nextReadme = currentReadme || "# README\n";
-	let mutationMessage = "";
-
-	if (intent === "CREATE") {
-		const entryLine = formatReadmeEntry({ title, url, content });
-		const mutation = appendReadmeEntry(nextReadme, section, entryLine);
-		nextReadme = mutation.content;
-		mutationMessage = mutation.message;
-	} else if (intent === "UPDATE") {
-		const replacementLine = formatReadmeEntry({ title, url, content });
-		const tokens = pickTokens(classification, message);
-		const mutation = replaceReadmeEntry(nextReadme, tokens, replacementLine);
-
-		if (!mutation.changed) {
-			const fallbackMutation = appendReadmeEntry(nextReadme, section, replacementLine);
-			nextReadme = fallbackMutation.content;
-			mutationMessage = `${mutation.message}. Added the entry to ${section} instead.`;
+	let classification: Classification | undefined;
+	let detail;
+	try {
+		const item = await categorise(message);
+		classification = item;
+		if (item.intent === "READ") {
+			const query = item.type === "command" ? item.query?.trim() || message : message;
+			const searchResults = await searchReadme(query);
+			detail = { message: await answerWithContext(query, searchResults), searchResults };
 		} else {
-			nextReadme = mutation.content;
-			mutationMessage = mutation.message;
+			detail = await withReadme(() => mutate(item));
 		}
-	} else if (intent === "DELETE") {
-		const tokens = pickTokens(classification, message);
-		const mutation = removeReadmeEntry(nextReadme, tokens);
-		nextReadme = mutation.content;
-		mutationMessage = mutation.message;
-	} else {
-		mutationMessage = "Unsupported intent; no README change was applied.";
+	} catch (error) {
+		await Resource.create({ kind: "audit", sourcePath: "telegram", intent: classification?.intent ?? "INVALID", content: message,
+			metadata: { classification, error: error instanceof Error ? error.message : "Processing failed" } }).catch(() => console.error("Could not record failed message in audit log"));
+		throw error;
 	}
-
-	const contentActuallyChanged = nextReadme !== currentReadme;
-
-	let repoWrite = undefined;
-	if ((intent === "CREATE" || intent === "UPDATE" || intent === "DELETE") && contentActuallyChanged) {
-		repoWrite = await writeRepo({
-			content: nextReadme,
-			path: "README.md",
-			commitMessage: `${intent} README entry from Telegram`,
-		});
-		await syncReadmeIndex(nextReadme);
+	const { intent } = classification;
+	try {
+		await Resource.create({ kind: "audit", sourcePath: "telegram", intent, content: message,
+			metadata: { classification, message: detail.message } });
+	} catch {
+		console.error("Could not record processed message in audit log");
+		detail.message += " (Audit log unavailable.)";
 	}
-
-	await Resource.create({
-		kind: "audit",
-		sourcePath: "telegram",
-		intent,
-		content: message,
-		metadata: { classification, mutationMessage, repoWrite },
-	});
-
-	return {
-		intent,
-		classification,
-		message: formatResultMessage(intent, mutationMessage),
-		repoWrite,
-		updatedReadme: nextReadme,
-	};
+	return { intent, classification, ...detail };
 };

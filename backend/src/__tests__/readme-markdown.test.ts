@@ -113,3 +113,15 @@ describe("compactReadmeText", () => {
 		expect(compactReadmeText("\r\n# Title\r\n\r\nBody\r\n\r\n")).toBe("# Title\n\nBody");
 	});
 });
+
+it("keeps sibling bullets contiguous and inserts before a nested heading", () => {
+	const initial = "# Second Brain\n\n## Links\n\n- One\n\n### Archived\n\n- Old\n";
+	expect(appendReadmeEntry(initial, "Links", "- Two").content).toBe(initial.replace("- One", "- One\n- Two"));
+});
+
+it("ignores fenced examples and refuses ambiguous or partial-word deletions", () => {
+	const content = "## Notes\n```md\n- Lemon\n```\n- Docker desktop\n- Docker engine\n";
+	expect(removeReadmeEntry(content, ["Lemon"]).changed).toBe(false);
+	expect(removeReadmeEntry(content, ["dock"]).changed).toBe(false);
+	expect(() => removeReadmeEntry(content, ["Docker"])).toThrow(/more specific/);
+});

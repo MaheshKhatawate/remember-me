@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 class IndexRequest(BaseModel):
     source_path: str = Field(default="README.md")
-    content: str = Field(default="")
+    content: str
 
 
 class IndexResponse(BaseModel):
@@ -27,6 +27,7 @@ class SearchResult(BaseModel):
 
 
 class QueryResponse(BaseModel):
+    revision: Optional[str] = None
     query: str
     results: List[SearchResult]
 

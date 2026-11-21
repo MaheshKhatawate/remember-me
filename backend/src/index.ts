@@ -2,7 +2,7 @@ import express from "express";
 import { configDotenv } from "dotenv";
 import mongoose from "mongoose";
 import cors from "cors";
-import { bot } from "./services/bot.js";
+import { bot, registerCommands } from "./services/bot.js";
 import reader from "./apis/reader.js";
 import status from "./apis/status.js";
 import sync from "./apis/sync.js";
@@ -43,8 +43,11 @@ mongoose
 		console.log("Connected to MongoDB");
 		server = app.listen(PORT, () => {
 			console.log(`Server running on http://localhost:${PORT}`);
-			bot.launch();
-			console.log("Telegram bot is running");
+			void registerCommands();
+			void bot.launch(() => console.log("Telegram bot is running")).catch((error: unknown) => {
+				console.error("Telegram polling failed", error instanceof Error ? error.name : "unknown error");
+				void shutdown("Telegram stopped", 1);
+			});
 		});
 	})
 	.catch((error) => {
@@ -52,12 +55,12 @@ mongoose
 		process.exit(1);
 	});
 
-const shutdown = async (signal: string) => {
+const shutdown = async (signal: string, exitCode = 0) => {
 	console.log(`Received ${signal}, shutting down gracefully...`);
-	bot.stop(signal);
-	server?.close();
+	try { bot.stop(signal); } catch { /* Polling may still be starting. */ }
+	if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
 	await mongoose.connection.close().catch(() => undefined);
-	process.exit(0);
+	process.exit(exitCode);
 };
 
 process.once("SIGINT", () => void shutdown("SIGINT"));
